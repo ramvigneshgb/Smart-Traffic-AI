@@ -1,0 +1,22 @@
+Ignore Python cache
+
+pycache/
+*.pyc
+
+Ignore large model files
+
+This is very important!
+
+*.pt
+*.avi
+*.mp4
+
+Ignore all training runs (these can be huge)
+
+runs/
+
+Ignore video files
+
+TestVideo/
+
+VehiclesDetectionDataset/
