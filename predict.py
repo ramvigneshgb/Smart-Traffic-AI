@@ -1,97 +1,95 @@
 from ultralytics import YOLO
-import os
 import cv2
 import numpy as np
-import time
-from traffic_logic import TrafficLightController  
-
+from traffic_logic import IntersectionController  
 
 def main():
-    model_path = 'yolov8n.pt'
-    
-    video_path = os.path.join('TestVideo', 'test_video.mp4')
+    model = YOLO('yolov8n.pt') 
+    master_controller = IntersectionController()
 
-    print(f"Loading model from {model_path}...")
-    model = YOLO(model_path)
-    print("Model loaded successfully.")
+    camera_feeds = {
+        "North": "TestVideo/north_cam.mp4",
+        "South": "TestVideo/south_cam.mp4",
+        "East":  "TestVideo/east_cam.mp4",
+        "West":  "TestVideo/west_cam.mp4"
+    }
 
-    lane_roi = np.array([
-        [394, 366], 
-        [486, 358], 
-        [499, 717],  
-        [209, 713]
-    ], np.int32)
+    caps = {}
+    for lane, path in camera_feeds.items():
+        caps[lane] = cv2.VideoCapture(path)
 
-    light_controller = TrafficLightController()
-    
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        print(f"Error: Could not open video file {video_path}")
-        return
+    rois = {
+        "North": np.array([[100, 200], [500, 200], [600, 400], [50, 400]], np.int32),
+        "South": np.array([[100, 200], [500, 200], [600, 400], [50, 400]], np.int32),
+        "East":  np.array([[100, 200], [500, 200], [600, 400], [50, 400]], np.int32),
+        "West":  np.array([[100, 200], [500, 200], [600, 400], [50, 400]], np.int32)
+    }
 
-    frame_width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    fps = cap.get(cv2.CAP_PROP_FPS)
+    print("System Online. Monitoring for Traffic Flow and Accidents...")
 
-    print(f"Video opened: {frame_width}x{frame_height} @ {fps} FPS")
+    while True:
+        current_counts = {"North": 0, "South": 0, "East": 0, "West": 0}
+        current_accidents = {"North": False, "South": False, "East": False, "West": False}
+        frames_for_display = {}
 
-    while cap.isOpened():
-        success, frame = cap.read()
-        if not success:
-            print("Video finished or frame read error.")
-            break
+        for lane, cap in caps.items():
+            success, frame = cap.read()
+            if not success:
+                continue 
+
+            results = model(frame, verbose=False)
             
-
-        results = model(frame, verbose=False) 
-        
-        vehicle_count_in_roi = 0
-        
-        for box in results[0].boxes:
-
-            class_id = int(box.cls)
-            class_name = model.names[class_id]
-            
-            if class_name in ['car', 'truck', 'bus', 'motorcycle']:
+            for box in results[0].boxes:
+                class_name = model.names[int(box.cls)]
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
+                center_x, center_y = (x1 + x2) // 2, (y1 + y2) // 2
                 
-                center_x = (x1 + x2) // 2
-                center_y = (y1 + y2) // 2
-                
-                is_in_roi = cv2.pointPolygonTest(lane_roi, (center_x, center_y), False) >= 0
-                
-                if is_in_roi:
-                    vehicle_count_in_roi += 1
-                    color = (0, 0, 255) 
-                else:
-                    color = (255, 0, 0) 
-                
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                label = f"{class_name} {box.conf[0]:.2f}"
-                cv2.putText(frame, label, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, color, 2)
-
-        light_controller.update(vehicle_count_in_roi)
-        
-        light_color = light_controller.get_state_color()
-        timer_display = light_controller.get_timer_display()
-
-        cv2.polylines(frame, [lane_roi], isClosed=True, color=(0, 255, 0), thickness=2)
-
-        cv2.putText(frame, f"Vehicles in ROI: {vehicle_count_in_roi}", 
-                    (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+                # Verify object is inside the lane ROI
+                if cv2.pointPolygonTest(rois[lane], (center_x, center_y), False) >= 0:
                     
-        cv2.circle(frame, (frame_width - 100, 100), 50, light_color, -1)
-        
-        cv2.putText(frame, str(timer_display), 
-                    (frame_width - 125, 115), cv2.FONT_HERSHEY_SIMPLEX, 2, (255, 255, 255), 3)
+                    # 1. Standard Vehicle Counting
+                    if class_name in ['car', 'truck', 'bus', 'motorcycle']:
+                        current_counts[lane] += 1
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 2)
+                    
+                    # 2. Accident Detection Override
+                    elif class_name == 'accident':
+                        current_accidents[lane] = True
+                        # Draw a thick, highly visible Orange box around the crash
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 165, 255), 5)
+                        cv2.putText(frame, "CRASH DETECTED", (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 165, 255), 3)
 
-        cv2.imshow("Smart Traffic AI - Press 'q' to quit", frame)
+            # Draw HUD
+            light_color = master_controller.get_state_color(lane)
+            cv2.polylines(frame, [rois[lane]], True, (0, 255, 255), 2)
+            cv2.putText(frame, f"State: {master_controller.states[lane]}", (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1, light_color, 2)
+            cv2.putText(frame, f"Queue: {current_counts[lane]}", (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+            
+            # If blocked, flash a big warning on that camera feed
+            if current_accidents[lane]:
+                cv2.putText(frame, "LANE BLOCKED", (150, 240), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 165, 255), 4)
+
+            frames_for_display[lane] = cv2.resize(frame, (640, 480))
+
+        # Feed counts AND accident reports to the Master Brain
+        master_controller.update(current_counts, current_accidents)
+
+        if len(frames_for_display) == 4:
+            top_row = np.hstack((frames_for_display["North"], frames_for_display["South"]))
+            bottom_row = np.hstack((frames_for_display["East"], frames_for_display["West"]))
+            dashboard = np.vstack((top_row, bottom_row))
+            
+            cv2.putText(dashboard, f"Active ({master_controller.active_lane}): {master_controller.get_timer_display()}s", 
+                        (500, 480), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+            
+            cv2.imshow("Smart Traffic Control Center", dashboard)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
-    cap.release()
+    for cap in caps.values():
+        cap.release()
     cv2.destroyAllWindows()
-    print("Video processing finished. Resources released.")
 
 if __name__ == "__main__":
     main()

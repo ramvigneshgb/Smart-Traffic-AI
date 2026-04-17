@@ -1,75 +1,85 @@
 import time
 
-class TrafficLightController:
+class IntersectionController:
     """
-    Manages the state of a single traffic light based on vehicle counts.
+    Manages a 4-way intersection. Ensures only one lane is GREEN at a time.
+    NEW: Includes an Accident Response Protocol to shut down blocked lanes.
     """
     def __init__(self):
-        self.state = "RED"  # Start as RED
-        self.last_state_change_time = time.time()
+        self.states = {"North": "GREEN", "South": "RED", "East": "RED", "West": "RED"}
+        self.queues = {"North": 0, "South": 0, "East": 0, "West": 0}
+        self.accidents = {"North": False, "South": False, "East": False, "West": False}
+        self.active_lane = "North"
         
-        # --- Configuration ---
-        self.GREEN_DURATION = 30  # Max green light time (seconds)
-        self.RED_DURATION = 60    # Max red light time
-        self.EMPTY_LANE_TIMEOUT = 5 # How long to wait for an empty green lane
-        
-        # This tracks the timer for an empty lane
-        self.current_empty_lane_start_time = -1
+        self.last_switch_time = time.time()
+        self.empty_start_time = -1
 
-    def get_state_color(self):
-        """Returns the (B,G,R) color for the current state."""
-        return (0, 255, 0) if self.state == "GREEN" else (0, 0, 255)
+        self.MIN_GREEN_DURATION = 10  
+        self.MAX_GREEN_DURATION = 40  
+        self.EMPTY_LANE_TIMEOUT = 4   
+
+    def update(self, vehicle_counts: dict, accident_alerts: dict):
+        self.queues = vehicle_counts
+        self.accidents = accident_alerts
+        current_time = time.time()
+        elapsed_time = current_time - self.last_switch_time
+        active_count = self.queues.get(self.active_lane, 0)
+
+        # 🚨 ACCIDENT OVERRIDE LOGIC 🚨
+        for lane, has_accident in self.accidents.items():
+            if has_accident:
+                self.states[lane] = "BLOCKED"
+
+        # If an accident happens in the currently active green lane, shut it down instantly
+        if self.accidents.get(self.active_lane, False):
+            self._switch_to_highest_queue(current_time)
+            return # Exit early
+
+        # Standard Empty Lane Tracking
+        if active_count == 0 and self.empty_start_time == -1:
+            self.empty_start_time = current_time
+        elif active_count > 0:
+            self.empty_start_time = -1
+
+        force_switch = False
+        
+        if elapsed_time >= self.MAX_GREEN_DURATION:
+            force_switch = True
+        elif elapsed_time >= self.MIN_GREEN_DURATION and self.empty_start_time != -1:
+            if (current_time - self.empty_start_time) >= self.EMPTY_LANE_TIMEOUT:
+                force_switch = True
+
+        if force_switch:
+            self._switch_to_highest_queue(current_time)
+
+    def _switch_to_highest_queue(self, current_time):
+        best_lane = None
+        max_queue = -1
+        
+        for lane, count in self.queues.items():
+            # Skip the active lane AND skip any lane with an accident
+            if lane != self.active_lane and not self.accidents[lane]:
+                if count > max_queue:
+                    max_queue = count
+                    best_lane = lane
+
+        if max_queue > 0 and best_lane is not None:
+            # Change old lane to RED (unless it was blocked by an accident)
+            if self.states[self.active_lane] != "BLOCKED":
+                self.states[self.active_lane] = "RED"
+                
+            self.active_lane = best_lane
+            self.states[self.active_lane] = "GREEN"
+            self.last_switch_time = current_time
+            self.empty_start_time = -1
+
+    def get_state_color(self, lane):
+        if self.states[lane] == "GREEN":
+            return (0, 255, 0)
+        elif self.states[lane] == "BLOCKED":
+            return (0, 165, 255) # Orange for Accidents
+        else:
+            return (0, 0, 255) # Red
 
     def get_timer_display(self):
-        """Returns the time remaining in the current state as a string."""
-        elapsed = time.time() - self.last_state_change_time
-        
-        if self.state == "GREEN":
-            # If we are in the "empty lane" countdown
-            if self.current_empty_lane_start_time != -1:
-                empty_elapsed = time.time() - self.current_empty_lane_start_time
-                return max(0, int(self.EMPTY_LANE_TIMEOUT - empty_elapsed))
-            # Otherwise, show the max green time
-            return max(0, int(self.GREEN_DURATION - elapsed))
-        else:
-            # If red, timer counts down from max
-            return max(0, int(self.RED_DURATION - elapsed))
-
-    def update(self, vehicle_count):
-        """
-        This is the "brain". Call this on every frame.
-        It updates the light's state based on the vehicle count.
-        """
-        current_time = time.time()
-        elapsed_time = current_time - self.last_state_change_time
-        
-        # --- GREEN LIGHT LOGIC ---
-        if self.state == "GREEN":
-            if vehicle_count > 0:
-                # Cars are present. Reset the "empty lane" timer.
-                self.current_empty_lane_start_time = -1 
-            
-            if vehicle_count == 0 and self.current_empty_lane_start_time == -1:
-                # Lane just became empty. Start a 5-second timer.
-                self.current_empty_lane_start_time = current_time
-            
-            # Check if we should turn RED
-            empty_timeout_lapsed = (self.current_empty_lane_start_time != -1 and (current_time - self.current_empty_lane_start_time) >= self.EMPTY_LANE_TIMEOUT)
-            max_green_time_lapsed = (elapsed_time >= self.GREEN_DURATION)
-
-            if empty_timeout_lapsed or max_green_time_lapsed:
-                self.state = "RED"
-                self.last_state_change_time = current_time
-                self.current_empty_lane_start_time = -1
-        
-        # --- RED LIGHT LOGIC ---
-        elif self.state == "RED":
-            # Check if we should turn GREEN
-            high_queue = (vehicle_count > 5) # Smart logic: big queue
-            cycle_finished = (elapsed_time >= self.RED_DURATION) # Standard logic: timer finished
-            
-            if high_queue or cycle_finished:
-                self.state = "GREEN"
-                self.last_state_change_time = current_time
-                self.current_empty_lane_start_time = -1 # Reset empty lane timer
-# --- END OF CLASS ---
+        return int(time.time() - self.last_switch_time)
